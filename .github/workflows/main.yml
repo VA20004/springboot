@@ -21,28 +21,18 @@ jobs:
       - name: Build with Maven
         run: mvn clean package -DskipTests
 
-      - name: Locate JAR and Verify
-        # This step finds where the JAR actually is and fails the build if missing
-        run: |
-          JAR_PATH=$(find . -path "*/target/*.jar" ! -name "*plain.jar" | head -n 1)
-          if [ -z "$JAR_PATH" ]; then
-            echo "::error::No executable JAR found in any target directory!"
-            exit 1
-          fi
-          echo "Found JAR at: $JAR_PATH"
-
       - name: Copy JAR to EC2
         uses: appleboy/scp-action@master
         with:
           host: ${{ secrets.EC2_HOST }}
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_KEY }}
-          # Use the double-star glob to find the JAR anywhere in the project
-          source: "**/target/*.jar"
+          # Points specifically to the target folder to avoid path nesting issues
+          source: "target/*.jar"
           target: "/home/ec2-user/app"
-          # strip_components: 2 removes 'folder/target/' from the path on the remote side
-          strip_components: 2
-          rm: true
+          strip_components: 1
+          # Set to false to prevent accidental deletion of the 'app' directory
+          rm: false
 
       - name: Restart Application on EC2
         uses: appleboy/ssh-action@master
@@ -51,17 +41,21 @@ jobs:
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_KEY }}
           script: |
+            mkdir -p /home/ec2-user/app
             cd /home/ec2-user/app || exit
-           
+            
             # 1. Stop the process currently using port 8080
-            sudo fuser -k 8080/tcp || true
-           
-            # 2. Identify the executable JAR (ignores the 'plain' metadata JAR)
-            APP_JAR=$(ls -S *.jar | grep -v "plain" | head -1)
-           
-            # 3. Start the application in the background
-            nohup java -jar "$APP_JAR" > app.log 2>&1 &
-           
-            # 4. Final check
+            sudo fuser -k 8080/tcp || echo "No process running on port 8080"
+            
+            # 2. Identify the executable JAR (ignoring 'plain' jar)
+            APP_JAR=$(ls -S target/*.jar | grep -v "plain" | head -1)
+            
+            # 3. Move JAR up from target/ (because scp-action keeps the source folder name)
+            mv $APP_JAR app.jar
+            
+            # 4. Start the application in the background
+            nohup java -jar app.jar > app.log 2>&1 &
+            
+            # 5. Final check
             sleep 5
-            ps aux | grep java | grep -v grep
+            pgrep -f app.jar && echo "Application started successfully" || (echo "Application failed to start" && exit 1)
